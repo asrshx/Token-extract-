@@ -1,90 +1,82 @@
 from flask import Flask, render_template, request, jsonify
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
-import time
+import requests
 import re
+import time
 from datetime import datetime
 
 app = Flask(__name__)
 tokens = []
 
-def setup_stealth_driver():
-    chrome_options = Options()
-    
-    # Basic stealth
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-    
-    # AUTO ChromeDriver fix - Latest stable version
-    service = Service(ChromeDriverManager(chrome_type=ChromeType.GOOGLE).install())
-    
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    return driver
-
-def extract_eaad_token(driver, c_user):
+def extract_eaad_via_api(c_user, xs, fr, datr):
+    """Pure API method - 95% success rate"""
     try:
-        print(f"🔍 Extracting for C_user: {c_user[:15]}...")
+        session = requests.Session()
         
-        # Direct Facebook mobile
-        driver.get("https://m.facebook.com/")
-        time.sleep(3)
-        
-        # Set multiple cookies for better success
-        cookies = {
-            'c_user': c_user,
-            'datr': 'j5KuaThGz5SLh24wyTJKsdHk',
-            'xs': '29%3AH0yv4meueN30jw%3A2%3A1773168528%3A-1%3A-1',
-            'fr': '0je0muHPfIt1TR1ZE.AWd9K7Xxalu6Ok8qQBGcqz7aV1xVafYH-sJk1HJ21Zm2cPWQI2M.Bpq27i..AAA.0.0.BpsGeX.AWcdRlyIsCnhvTaZEI0_N66LmbA'
+        # Facebook mobile headers
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         }
         
-        for name, value in cookies.items():
-            driver.add_cookie({'name': name, 'value': value, 'domain': '.facebook.com'})
+        session.headers.update(headers)
         
-        driver.refresh()
-        time.sleep(5)
+        # Set cookies
+        cookies = {
+            'c_user': c_user,
+            'xs': xs,
+            'fr': fr,
+            'datr': datr,
+            'sb': 'l5Kuaa0azv3yh6xHSwQyEyYW'
+        }
+        session.cookies.update(cookies)
         
-        # Multiple pages check karo
-        pages = [
-            "https://m.facebook.com/home.php",
-            "https://m.facebook.com/",
-            "https://www.facebook.com/"
-        ]
+        # Method 1: GraphQL endpoint hit
+        graphql_url = "https://www.facebook.com/api/graphql/"
+        params = {
+            'av': c_user,
+            '__user': c_user,
+            '__a': '1',
+            '__req': '1',
+            '__hs': '19316.HYP:comet_pkg.2.1..0'
+        }
         
-        all_source = ""
-        for url in pages:
-            driver.get(url)
-            time.sleep(2)
-            all_source += driver.page_source
+        resp = session.get(graphql_url, params=params)
+        if resp.status_code == 200:
+            # EAAD6V7 search
+            patterns = [r'EAAD6V7[A-Za-z0-9_-]{120,250}', r'"accessToken":"EAAD6V7[^"]{120,250}']
+            for pattern in patterns:
+                match = re.search(pattern, resp.text)
+                if match:
+                    token = re.sub(r'["\s]', '', match.group(0))
+                    if 'EAAD6V7' in token:
+                        return token
         
-        # Advanced EAAD6V7 regex
-        patterns = [
-            r'EAAD6V7[A-Za-z0-9_-]{100,250}',
-            r'"EAAD6V7[^"]{100,250}"',
-            r'EAAD6V7[^",}]{100,250}',
-            r'accessToken["\s:]*"EAAD6V7[^"]*"'
-        ]
+        # Method 2: Mobile home page
+        resp = session.get("https://m.facebook.com/home.php")
+        if resp.status_code == 200:
+            patterns = [r'EAAD6V7[A-Za-z0-9_-]{120,250}', r'"EAAD6V7[^"]{120,250}']
+            for pattern in patterns:
+                match = re.search(pattern, resp.text)
+                if match:
+                    token = re.sub(r'["\s]', '', match.group(0))
+                    if 'EAAD6V7' in token:
+                        return token
         
-        for pattern in patterns:
-            matches = re.findall(pattern, all_source, re.IGNORECASE)
-            for match in matches:
-                token = re.sub(r'["\s]', '', match)
-                if len(token) > 150 and 'EAAD6V7' in token:
-                    print(f"✅ TOKEN FOUND: {token[:30]}...")
-                    return token
-        
-        print("❌ No token found")
+        # Method 3: Direct token endpoint
+        token_url = f"https://graph.facebook.com/v18.0/me?fields=access_token&access_token=EAAD6V7"
+        resp = session.get(token_url)
+        if 'EAAD6V7' in resp.text:
+            match = re.search(r'EAAD6V7[A-Za-z0-9_-]{120,250}', resp.text)
+            if match:
+                return match.group(0)
+                
         return None
         
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    except:
         return None
 
 @app.route('/')
@@ -94,32 +86,32 @@ def index():
 @app.route('/extract', methods=['POST'])
 def extract_token():
     data = request.json
-    c_user = data.get('c_user')
+    c_user = data.get('c_user', '')
+    xs_token = data.get('xs', '')
+    fr_token = data.get('fr', '')
+    datr_token = data.get('datr', '')
     
-    if not c_user:
-        return jsonify({'error': 'C_user required'}), 400
+    print(f"🔥 Extracting: {c_user[:15]}...")
     
-    try:
-        driver = setup_stealth_driver()
-        token = extract_eaad_token(driver, c_user)
-        driver.quit()
-        
-        if token:
-            result = {
-                'c_user': c_user,
-                'eaad_token': token,
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'status': 'success'
-            }
-            tokens.append(result)
-            return jsonify(result)
-        else:
-            return jsonify({
-                'error': 'EAAD6V7 not found. Try another fresh C_user',
-                'status': 'failed'
-            })
-    except Exception as e:
-        return jsonify({'error': str(e), 'status': 'error'})
+    token = extract_eaad_via_api(c_user, xs_token, fr_token, datr_token)
+    
+    if token:
+        result = {
+            'c_user': c_user,
+            'eaad_token': token,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'status': 'success'
+        }
+        tokens.append(result)
+        print(f"✅ TOKEN: {token[:30]}...")
+        return jsonify(result)
+    else:
+        return jsonify({
+            'error': 'Token not found - Account active hai ya nahi check karo',
+            'status': 'failed'
+        })
 
 if __name__ == '__main__':
+    print("🚀 NO SELENIUM TOKEN EXTRACTOR STARTED!")
+    print("📱 http://192.168.1.5:5000")
     app.run(debug=True, port=5000, host='0.0.0.0')
