@@ -1,69 +1,115 @@
 from flask import Flask, render_template, request, jsonify
-import requests
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 import time
-import threading
-import json
 import re
 from datetime import datetime
 
 app = Flask(__name__)
-
-# Global storage for tokens
 tokens = []
 
 def setup_stealth_driver():
     chrome_options = Options()
+    
+    # Stealth options to avoid detection
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-plugins-discovery")
     chrome_options.add_argument("--disable-web-security")
+    chrome_options.add_argument("--allow-running-insecure-content")
     chrome_options.add_argument("--disable-features=VizDisplayCompositor")
     
-    driver = webdriver.Chrome(options=chrome_options)
+    # User agent realistic banao
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # Headless mode OFF rakho pehle testing ke liye (comment kar sakte ho)
+    # chrome_options.add_argument("--headless")
+    
+    # Experimental options
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    # Auto ChromeDriver setup
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    # Extra stealth script
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
+    driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
+    
     return driver
 
 def extract_eaad_token(driver, c_user):
     try:
-        # Facebook login page pe jaao
-        driver.get("https://www.facebook.com/")
-        time.sleep(3)
+        print("Starting extraction for C_user:", c_user[:20] + "...")
         
-        # C_user cookie set karo
-        driver.add_cookie({'name': 'c_user', 'value': c_user, 'domain': '.facebook.com'})
+        # Facebook pe jaao
+        driver.get("https://m.facebook.com/")
+        time.sleep(4)
+        
+        # Cookie set karo
+        driver.add_cookie({
+            'name': 'c_user', 
+            'value': c_user, 
+            'domain': '.facebook.com',
+            'path': '/',
+            'secure': True
+        })
+        
+        # Refresh karo cookie load hone ke liye
         driver.refresh()
         time.sleep(5)
         
-        # Facebook pe navigate karo aur token dhundho
-        driver.get("https://www.facebook.com/")
+        # Mobile Facebook pe token dhundho (better success rate)
+        driver.get("https://m.facebook.com/")
+        time.sleep(4)
+        
+        # Multiple extraction methods
+        page_source = driver.page_source
+        
+        # Method 1: Direct EAAD6V7 search
+        eaad_patterns = [
+            r'"EAAD6V7[^"]*"',
+            r'EAAD6V7[^",}]*',
+            r'"accessToken":"EAAD6V[^"]*"',
+            r'EAAD6V[^",}]*'
+        ]
+        
+        for pattern in eaad_patterns:
+            match = re.search(pattern, page_source, re.IGNORECASE)
+            if match:
+                token = match.group(0).strip('"')
+                if len(token) > 50:  # Valid token length check
+                    print("Token found via regex:", token[:30] + "...")
+                    return token
+        
+        # Method 2: GraphQL requests check
+        driver.get("https://m.facebook.com/home.php")
         time.sleep(3)
         
-        # Page source se EAAD6V7 token extract karo
         page_source = driver.page_source
-        eaad_match = re.search(r'"EAAD6V7[^"]+"', page_source)
+        for pattern in eaad_patterns:
+            match = re.search(pattern, page_source, re.IGNORECASE)
+            if match:
+                token = match.group(0).strip('"')
+                if len(token) > 50:
+                    print("Token found via GraphQL:", token[:30] + "...")
+                    return token
         
-        if eaad_match:
-            eaad_token = eaad_match.group(0).strip('"')
-            return eaad_token
-        else:
-            # Alternative method - network requests check karo
-            for request in driver.requests:
-                if 'EAAD6V7' in request.response.body:
-                    token_match = re.search(r'EAAD6V7[^",}]*(?=["}]|$)', request.response.body)
-                    if token_match:
-                        return token_match.group(0)
-        
+        print("No EAAD6V7 token found")
         return None
+        
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Extraction error: {e}")
         return None
 
 @app.route('/')
@@ -75,10 +121,11 @@ def extract_token():
     data = request.json
     c_user = data.get('c_user')
     
-    if not c_user:
-        return jsonify({'error': 'C_user cookie required'}), 400
+    if not c_user or len(c_user) < 10:
+        return jsonify({'error': 'Valid C_user cookie required (min 10 chars)'}), 400
     
     try:
+        print(f"New extraction request for C_user: {c_user[:20]}...")
         driver = setup_stealth_driver()
         token = extract_eaad_token(driver, c_user)
         driver.quit()
@@ -91,12 +138,20 @@ def extract_token():
                 'status': 'success'
             }
             tokens.append(token_data)
+            print("✅ Token extracted successfully!")
             return jsonify(token_data)
         else:
-            return jsonify({'error': 'EAAD6V7 token not found', 'status': 'failed'})
+            return jsonify({
+                'error': 'EAAD6V7 token not found. Try valid active C_user cookie.',
+                'status': 'failed',
+                'hint': 'Make sure C_user is from active logged-in session'
+            })
             
     except Exception as e:
-        return jsonify({'error': str(e), 'status': 'error'})
+        print(f"❌ Critical error: {e}")
+        return jsonify({'error': f'Extraction failed: {str(e)}', 'status': 'error'})
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    print("🚀 Starting Facebook Token Extractor Panel...")
+    print("📱 Visit: http://localhost:5000")
+    app.run(debug=True, port=5000, host='0.0.0.0')
